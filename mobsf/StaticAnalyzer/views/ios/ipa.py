@@ -2,6 +2,7 @@
 """iOS Analysis."""
 import logging
 from pathlib import Path
+import re
 
 import mobsf.MalwareAnalyzer.views.Trackers as Trackers
 import mobsf.MalwareAnalyzer.views.VirusTotal as VirusTotal
@@ -68,14 +69,20 @@ from mobsf.MobSF.views.authorization import (
 
 logger = logging.getLogger(__name__)
 
-import re
 
-# --- FILTER REGEX ---
-TOKEN_AUTH_RX = re.compile(
-    r"(?i)(?:\S*(?:token|auth)\w*\s*[:=]\s*['\"`]?([\w\-=\.]+)['\"`]?|<[^>]*(?:token|auth)[^>]*>([^<]+)<|{{\s*[\w\.]*(?:token|auth)\w*\s*}})"
-)
 SBER_URL_RX_STRICT = re.compile(
     r"\bhttps?:\/\/[\w.-]*(?:sberbank|sber|sbrf|sigma|delta|ci\d+|ift|majorcheck|majorgo)[^\s\"'<]*",
+    re.IGNORECASE,
+)
+
+TOKEN_AUTH_RX = re.compile(
+    r"(?i)(?:\S*(?:token|auth)\w*\s*[:=]\s*['\"]?([\w\-=\.]+)['\"]?"
+    r"|<[^>]*(?:token|auth)[^>]*>([^<]+)<"
+    r"|{{\s*[\w\.]*(?:token|auth)\w*\s*}})"
+)
+
+KEY_RX = re.compile(
+    r"(['\"]?\w*key\w*['\"]?\s*[:=\s>\-]?\s*['\"]?\s*[a-zA-Z0-9_\s].*)|(\.\w*key\w*\s*\([^)]*\))",
     re.IGNORECASE,
 )
 
@@ -84,41 +91,89 @@ def _extract_text_from_secret_item(item) -> str:
         return item
     if not isinstance(item, dict):
         return str(item)
+
     for k in ("value", "match", "secret", "string", "line", "text", "evidence", "details"):
         v = item.get(k)
         if v:
             return str(v)
+
     for k in ("title", "description", "issue", "message"):
         v = item.get(k)
         if v:
             return str(v)
+
     return str(item)
 
-def _filter_secrets_list(secrets):
-    if not isinstance(secrets, list):
-        return secrets
+
+def _filter_secrets_list(secrets: list) -> list:
     out = []
     for it in secrets:
-        if TOKEN_AUTH_RX.search(_extract_text_from_secret_item(it)):
+        txt = _extract_text_from_secret_item(it)
+        if (TOKEN_AUTH_RX.search(txt) or KEY_RX.search(txt)):
             out.append(it)
     return out
 
+
+def _filter_secrets_in_code_dic(code_dic: dict):
+    """Фильтруем code_dic['secrets'] и потенциальные findings с секретами."""
+    if not isinstance(code_dic, dict):
+        return
+
+    secrets = code_dic.get("secrets")
+    if isinstance(secrets, list):
+        code_dic["secrets"] = _filter_secrets_list(secrets)
+
+    findings = code_dic.get("findings")
+    if isinstance(findings, list):
+        filtered = []
+        for f in findings:
+            if not isinstance(f, dict):
+                filtered.append(f)
+                continue
+
+            title = str(f.get("title") or "")
+            issue = str(f.get("issue") or "")
+            desc = str(f.get("description") or f.get("details") or "")
+
+            looks_like_secret_finding = (
+                "secret" in title.lower()
+                or "secret" in issue.lower()
+                or ("hardcoded" in title.lower() and "key" in title.lower())
+            )
+
+            if looks_like_secret_finding:
+                blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
+                if (TOKEN_AUTH_RX.search(blob) or KEY_RX.search(blob)):
+                    filtered.append(f)
+            else:
+                filtered.append(f)
+
+        code_dic["findings"] = filtered
+
+
 def _filter_urls_in_code_dic(code_dic: dict):
     """
-    Фильтруем URL в любом dict, где есть:
-      - urls_list: list[str]
-      - urls: list[{"path":..., "urls":[...]}]
+    iOS MobSF может хранить URL-группы в:
+      - urls      (новые версии)
+      - urlnfile  (часто iOS IPA)
+    и список плоских URL в urls_list.
+    Мы фильтруем ВСЕ эти варианты и делаем urls_list консистентным.
     """
     if not isinstance(code_dic, dict):
         return
 
-    # --- urls groups ---
-    uf_before = code_dic.get("urls") or []
+    group_key = None
+    if isinstance(code_dic.get("urls"), list):
+        group_key = "urls"
+    elif isinstance(code_dic.get("urlnfile"), list):
+        group_key = "urlnfile"
+
     filtered_groups = []
     flat_order = []
     seen_flat = set()
 
-    if isinstance(uf_before, list):
+    if group_key:
+        uf_before = code_dic.get(group_key) or []
         for item in uf_before:
             if not isinstance(item, dict):
                 continue
@@ -131,11 +186,15 @@ def _filter_urls_in_code_dic(code_dic: dict):
             group_urls = []
             for u in urls_in_item:
                 s = str(u).strip()
-                if not s or not SBER_URL_RX_STRICT.search(s):
+                if not s:
                     continue
+                if not SBER_URL_RX_STRICT.search(s):
+                    continue
+
                 if s not in group_seen:
                     group_seen.add(s)
                     group_urls.append(s)
+
                 if s not in seen_flat:
                     seen_flat.add(s)
                     flat_order.append(s)
@@ -143,7 +202,8 @@ def _filter_urls_in_code_dic(code_dic: dict):
             if group_urls:
                 filtered_groups.append({"path": path, "urls": group_urls})
 
-    # --- urls_list fallback ---
+        code_dic[group_key] = filtered_groups
+
     ul_before = code_dic.get("urls_list") or []
     ul_filtered = []
     if isinstance(ul_before, list):
@@ -153,49 +213,18 @@ def _filter_urls_in_code_dic(code_dic: dict):
                 seen_flat.add(s)
                 ul_filtered.append(s)
 
-    code_dic["urls"] = filtered_groups
     code_dic["urls_list"] = flat_order or ul_filtered
 
-def _filter_secrets_in_any(dic_obj: dict):
-    """
-    Фильтруем секреты в dict:
-      - secrets: list
-      - findings: list[dict] (если секреты там)
-    """
-    if not isinstance(dic_obj, dict):
-        return
-
-    if isinstance(dic_obj.get("secrets"), list):
-        dic_obj["secrets"] = _filter_secrets_list(dic_obj["secrets"])
-
-    findings = dic_obj.get("findings")
-    if isinstance(findings, list):
-        filtered = []
-        for f in findings:
-            if not isinstance(f, dict):
-                filtered.append(f)
-                continue
-            title = str(f.get("title") or "")
-            issue = str(f.get("issue") or "")
-            desc  = str(f.get("description") or f.get("details") or "")
-            looks_secret = ("secret" in title.lower()) or ("secret" in issue.lower())
-            if looks_secret:
-                blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
-                if TOKEN_AUTH_RX.search(blob):
-                    filtered.append(f)
-            else:
-                filtered.append(f)
-        dic_obj["findings"] = filtered
-
-def apply_post_filters_ios(app_dic: dict, code_dict: dict):
-    """
-    Применяем фильтры и к code_dict, и к app_dic['secrets'] (plist secrets).
-    """
-    _filter_urls_in_code_dic(code_dict)
-    _filter_secrets_in_any(code_dict)
+def apply_post_filters_ios(app_dic: dict, code_dic: dict):
+    """Единая точка применения фильтров после анализа."""
+    _filter_urls_in_code_dic(code_dic)
+    _filter_secrets_in_code_dic(code_dic)
 
     if isinstance(app_dic, dict) and isinstance(app_dic.get("secrets"), list):
         app_dic["secrets"] = _filter_secrets_list(app_dic["secrets"])
+
+
+
 def initialize_app_dic(app_dic, file_ext):
     """Initialize App Dictionary."""
     checksum = app_dic['md5_hash']
@@ -212,7 +241,6 @@ def get_size_and_hashes(app_dic):
 
 def extract_and_check_ipa(checksum, app_dic):
     """Extract and Check IPA."""
-    # EXTRACT IPA
     msg = 'Extracting IPA'
     logger.info(msg)
     append_scan_status(checksum, msg)
@@ -220,7 +248,6 @@ def extract_and_check_ipa(checksum, app_dic):
         checksum,
         app_dic['app_path'],
         app_dic['app_dir'])
-    # Identify Payload directory
     dirs = app_dic['app_dirp'].glob('**/*')
     for _dir in dirs:
         if 'payload' in _dir.as_posix().lower():
@@ -237,12 +264,10 @@ def common_analysis(scan_type, app_dic, checksum):
     location = app_dic['app_dir']
     if scan_type == 'ipa':
         location = app_dic['bin_dir']
-    # Get Files
     app_dic['all_files'] = ios_list_files(
         checksum,
         location,
         scan_type)
-    # Plist files are converted to xml/readable for ipa
     app_dic['infoplist'] = plist_analysis(
         checksum,
         location,
@@ -257,17 +282,15 @@ def common_analysis(scan_type, app_dic, checksum):
 
 def common_firebase_and_trackers(code_dict, app_dic, checksum):
     """Common Firebase and Trackers."""
-    # Firebase Analysis
     code_dict['firebase'] = firebase_analysis(
         checksum,
         code_dict)
-    # Extract Trackers from Domains
     trk = Trackers.Trackers(
         checksum,
         None,
         app_dic['tools_dir'])
     code_dict['trackers'] = trk.get_trackers_domains_or_deps(
-        code_dict['domains'], [])
+        code_dict.get('domains', []), [])
 
 
 def get_scan_subject(app_dic, bin_dict):
@@ -312,37 +335,42 @@ def ipa_analysis_task(checksum, app_dic, rescan, queue=False):
                     checksum, 'Failed', msg)
             return context, msg
 
-        # Common Analysis
         common_analysis('ipa', app_dic, checksum)
-        # IPA Binary Analysis
+
         bin_dict = binary_analysis(
             checksum,
             app_dic['bin_dir'],
             app_dic['tools_dir'],
             app_dic['app_dir'],
             app_dic['infoplist'].get('bin'))
-        # Analyze dylibs and frameworks
+
         lb = library_analysis(
             checksum,
             app_dic['bin_dir'],
             'macho')
         bin_dict['dylib_analysis'] = lb['macho_analysis']
         bin_dict['framework_analysis'] = lb['framework_analysis']
-        # Extract String metadata from binary
+
         code_dict = get_strings_metadata(
             app_dic,
             bin_dict,
             app_dic['all_files'],
             lb['macho_strings'])
-        
-        _filter_urls_in_code_dic(code_dict)
-        # Domain Extraction and Malware Check
+
+        apply_post_filters_ios(app_dic, code_dict)
+        logger.warning("AFTER FILTER urls_list=%d urls_groups=%d secrets(app)=%d secrets(code)=%d",
+               len(code_dict.get("urls_list") or []),
+               len(code_dict.get("urls") or []),
+               len(app_dic.get("secrets") or []),
+               len(code_dict.get("secrets") or []))
+
+        urls_for_domain = code_dict.get('urls_list') or []
         code_dict['domains'] = MalwareDomainCheck().scan(
             checksum,
-            code_dict['urls_list'])
-        # Get Icon
+            urls_for_domain)
+
         get_icon_from_ipa(app_dic)
-        # Firebase and Trackers
+
         common_firebase_and_trackers(code_dict, app_dic, checksum)
 
         code_dict['api'] = {}
@@ -384,7 +412,6 @@ def ipa_analysis(request, app_dic, rescan, api):
         context = get_context_from_db_entry(ipa_db)
         return generate_dynamic_context(request, app_dic, context, checksum, api)
     else:
-        # IPA Analysis
         if not has_permission(request, Permissions.SCAN, api):
             return print_n_send_error_response(request, 'Permission Denied', False)
         if settings.ASYNC_ANALYSIS:
@@ -409,33 +436,36 @@ def ios_analysis_task(checksum, app_dic, rescan, queue=False):
         logger.info('iOS Source Code Analysis Started')
         get_size_and_hashes(app_dic)
 
-        # ANALYSIS BEGINS - Already Unzipped
-        # append_scan_status init done in android static analyzer
         common_analysis('zip', app_dic, checksum)
 
-        # IOS Source Code Analysis
         code_dict = ios_source_analysis(
             checksum,
             app_dic['app_dir'])
-        # Extract Strings and entropies from source code
+
         ios_strs = strings_and_entropies(
             checksum,
             Path(app_dic['app_dir']),
             ['.swift', '.m', '.h', '.plist', '.json'])
-        if ios_strs['secrets']:
-            app_dic['secrets'].extend(list(ios_strs['secrets']))
-        # Get App Icon
+        if ios_strs.get('secrets'):
+            if isinstance(app_dic.get('secrets'), list):
+                app_dic['secrets'].extend(list(ios_strs['secrets']))
+
+        apply_post_filters_ios(app_dic, code_dict)
+
+        urls_for_domain = code_dict.get('urls_list') or []
+        code_dict['domains'] = MalwareDomainCheck().scan(checksum, urls_for_domain)
+
         get_icon_source(app_dic)
-        # Firebase and Trackers
+
         common_firebase_and_trackers(code_dict, app_dic, checksum)
 
         bin_dict = {
             'checksec': {},
             'libraries': [],
             'bin_code_analysis': {},
-            'strings': list(ios_strs['strings']),
+            'strings': list(ios_strs.get('strings') or []),
             'bin_info': {},
-            'bin_type': code_dict['source_type'],
+            'bin_type': code_dict.get('source_type'),
             'dylib_analysis': {},
             'framework_analysis': {},
         }
@@ -471,7 +501,6 @@ def ios_analysis(request, app_dic, rescan, api):
         context = get_context_from_db_entry(ios_zip_db)
         return generate_dynamic_ios_context(request, context, api)
     else:
-        # IOS Source Analysis
         if not has_permission(request, Permissions.SCAN, api):
             return print_n_send_error_response(request, 'Permission Denied', False)
         if settings.ASYNC_ANALYSIS:
