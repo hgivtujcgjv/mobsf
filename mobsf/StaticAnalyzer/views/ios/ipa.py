@@ -380,6 +380,8 @@ def ipa_analysis_task(checksum, app_dic, rescan, queue=False):
             bin_dict,
             app_dic['all_files'],
             lb['macho_strings'])
+        
+        _filter_urls_in_code_dic(code_dict)
         # Domain Extraction and Malware Check
         code_dict['domains'] = MalwareDomainCheck().scan(
             checksum,
