@@ -87,11 +87,6 @@ from mobsf.MobSF.views.authorization import (
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------
-# --- CUSTOM URL FILTER (Variant A) ----------------------------------
-# --------------------------------------------------------------------
-
-# Фильтр "нужных" URL (оставляем только эти домены/паттерны)
 SBER_URL_RX_STRICT = re.compile(
     r'\bhttps?:\/\/[\w.-]*(?:sberbank|sber|sbrf|sigma|delta|ci\d+|ift|majorcheck|majorgo)[^\s"\'<]*',
     re.IGNORECASE,
@@ -100,19 +95,22 @@ import re
 
 TOKEN_AUTH_RX = re.compile(r"(?i)(?:\S*(?:token|auth)\w*\s*[:=]\s*['\"`]?([\w\-=\.]+)['\"`]?|<[^>]*(?:token|auth)[^>]*>([^<]+)<|{{\s*[\w\.]*(?:token|auth)\w*\s*}})")
 
+KEY_RX = re.compile(
+    r"(['\"]?\w*key\w*['\"]?\s*[:=\s>\-]?\s*['\"]?\s*[a-zA-Z0-9_\s].*)|(\.\w*key\w*\s*\([^)]*\))",
+    re.IGNORECASE,
+)
+
 def _extract_text_from_secret_item(item) -> str:
     if isinstance(item, str):
         return item
     if not isinstance(item, dict):
         return str(item)
 
-    # самые частые поля в тулзах/линтерах
     for k in ("value", "match", "secret", "string", "line", "text", "evidence", "details"):
         v = item.get(k)
         if v:
             return str(v)
 
-    # иногда полезно смотреть “что нашли” в заголовке/описании
     for k in ("title", "description", "issue", "message"):
         v = item.get(k)
         if v:
@@ -124,7 +122,7 @@ def _filter_secrets_list(secrets: list) -> list:
     out = []
     for it in secrets:
         txt = _extract_text_from_secret_item(it)
-        if TOKEN_AUTH_RX.search(txt):
+        if (TOKEN_AUTH_RX.search(txt) or KEY_RX.search(txt)):
             out.append(it)
     return out
 
@@ -154,7 +152,7 @@ def _filter_secrets_in_code_dic(code_dic: dict):
 
             if looks_like_secret_finding:
                 blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
-                if TOKEN_AUTH_RX.search(blob):
+                if (TOKEN_AUTH_RX.search(blob) or KEY_RX.search(blob)):
                     filtered.append(f)
             else:
                 filtered.append(f)
