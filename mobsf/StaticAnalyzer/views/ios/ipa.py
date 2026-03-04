@@ -68,113 +68,51 @@ from mobsf.MobSF.views.authorization import (
 
 logger = logging.getLogger(__name__)
 
-# -------------------------------
-# TEST FILTERS: URL + SECRETS
-# -------------------------------
-import re 
+import re
 
+# --- FILTER REGEX ---
 TOKEN_AUTH_RX = re.compile(
     r"(?i)(?:\S*(?:token|auth)\w*\s*[:=]\s*['\"`]?([\w\-=\.]+)['\"`]?|<[^>]*(?:token|auth)[^>]*>([^<]+)<|{{\s*[\w\.]*(?:token|auth)\w*\s*}})"
 )
-
 SBER_URL_RX_STRICT = re.compile(
     r"\bhttps?:\/\/[\w.-]*(?:sberbank|sber|sbrf|sigma|delta|ci\d+|ift|majorcheck|majorgo)[^\s\"'<]*",
     re.IGNORECASE,
 )
 
-
-
 def _extract_text_from_secret_item(item) -> str:
-    """
-    Универсально вытаскиваем текст из элемента секрета (str/dict/любое).
-    Подходит и для app_dic['secrets'], и для code_dict['secrets'].
-    """
     if isinstance(item, str):
         return item
     if not isinstance(item, dict):
         return str(item)
-
     for k in ("value", "match", "secret", "string", "line", "text", "evidence", "details"):
         v = item.get(k)
         if v:
             return str(v)
-
     for k in ("title", "description", "issue", "message"):
         v = item.get(k)
         if v:
             return str(v)
-
     return str(item)
 
-def _filter_secrets_list(secrets: list) -> list:
-    """Оставляем только те элементы, где есть совпадение с TOKEN_AUTH_RX."""
+def _filter_secrets_list(secrets):
     if not isinstance(secrets, list):
         return secrets
     out = []
     for it in secrets:
-        txt = _extract_text_from_secret_item(it)
-        if TOKEN_AUTH_RX.search(txt):
+        if TOKEN_AUTH_RX.search(_extract_text_from_secret_item(it)):
             out.append(it)
     return out
 
-def _filter_secrets_in_code_dic(code_dic: dict):
-    """
-    Режем секреты в code_dic:
-    - code_dic['secrets'] (если есть)
-    - code_dic['findings'] (если секреты представлены как findings)
-    """
-    if not isinstance(code_dic, dict):
-        return
-
-    secrets = code_dic.get("secrets")
-    if isinstance(secrets, list):
-        before = len(secrets)
-        code_dic["secrets"] = _filter_secrets_list(secrets)
-        after = len(code_dic["secrets"])
-        logger.warning("SECRET FILTER: code_dic['secrets'] %d -> %d", before, after)
-
-    findings = code_dic.get("findings")
-    if isinstance(findings, list):
-        filtered = []
-        dropped = 0
-
-        for f in findings:
-            if not isinstance(f, dict):
-                filtered.append(f)
-                continue
-
-            title = str(f.get("title") or "")
-            issue = str(f.get("issue") or "")
-            desc  = str(f.get("description") or f.get("details") or "")
-
-            looks_like_secret_finding = (
-                "secret" in title.lower()
-                or "secret" in issue.lower()
-                or ("hardcoded" in title.lower() and "key" in title.lower())
-            )
-
-            if looks_like_secret_finding:
-                blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
-                if TOKEN_AUTH_RX.search(blob):
-                    filtered.append(f)
-                else:
-                    dropped += 1
-            else:
-                filtered.append(f)
-
-        code_dic["findings"] = filtered
-        if dropped:
-            logger.warning("SECRET FILTER: dropped %d secret-like findings", dropped)
-
 def _filter_urls_in_code_dic(code_dic: dict):
     """
-    Фильтруем URL на уровне итогового code_dic:
-    - сохраняем ВСЕ источники (path) отдельно (не схлопываем resources vs code)
-    - urls_list делаем плоским уникальным списком того, что реально показываем/сканим
+    Фильтруем URL в любом dict, где есть:
+      - urls_list: list[str]
+      - urls: list[{"path":..., "urls":[...]}]
     """
     if not isinstance(code_dic, dict):
         return
 
+    # --- urls groups ---
     uf_before = code_dic.get("urls") or []
     filtered_groups = []
     flat_order = []
@@ -193,15 +131,11 @@ def _filter_urls_in_code_dic(code_dic: dict):
             group_urls = []
             for u in urls_in_item:
                 s = str(u).strip()
-                if not s:
+                if not s or not SBER_URL_RX_STRICT.search(s):
                     continue
-                if not SBER_URL_RX_STRICT.search(s):
-                    continue
-
                 if s not in group_seen:
                     group_seen.add(s)
                     group_urls.append(s)
-
                 if s not in seen_flat:
                     seen_flat.add(s)
                     flat_order.append(s)
@@ -209,6 +143,7 @@ def _filter_urls_in_code_dic(code_dic: dict):
             if group_urls:
                 filtered_groups.append({"path": path, "urls": group_urls})
 
+    # --- urls_list fallback ---
     ul_before = code_dic.get("urls_list") or []
     ul_filtered = []
     if isinstance(ul_before, list):
@@ -221,27 +156,46 @@ def _filter_urls_in_code_dic(code_dic: dict):
     code_dic["urls"] = filtered_groups
     code_dic["urls_list"] = flat_order or ul_filtered
 
-    logger.warning(
-        "URL FILTER: urls_groups=%d urls_list=%d",
-        len(code_dic.get("urls") or []),
-        len(code_dic.get("urls_list") or []),
-    )
+def _filter_secrets_in_any(dic_obj: dict):
+    """
+    Фильтруем секреты в dict:
+      - secrets: list
+      - findings: list[dict] (если секреты там)
+    """
+    if not isinstance(dic_obj, dict):
+        return
+
+    if isinstance(dic_obj.get("secrets"), list):
+        dic_obj["secrets"] = _filter_secrets_list(dic_obj["secrets"])
+
+    findings = dic_obj.get("findings")
+    if isinstance(findings, list):
+        filtered = []
+        for f in findings:
+            if not isinstance(f, dict):
+                filtered.append(f)
+                continue
+            title = str(f.get("title") or "")
+            issue = str(f.get("issue") or "")
+            desc  = str(f.get("description") or f.get("details") or "")
+            looks_secret = ("secret" in title.lower()) or ("secret" in issue.lower())
+            if looks_secret:
+                blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
+                if TOKEN_AUTH_RX.search(blob):
+                    filtered.append(f)
+            else:
+                filtered.append(f)
+        dic_obj["findings"] = filtered
 
 def apply_post_filters_ios(app_dic: dict, code_dict: dict):
     """
-    Удобный хелпер: прогнать фильтры одним вызовом.
-    Для iOS дополнительно режем app_dic['secrets'] (plist secrets), если нужно.
+    Применяем фильтры и к code_dict, и к app_dic['secrets'] (plist secrets).
     """
-    _filter_secrets_in_code_dic(code_dict)
     _filter_urls_in_code_dic(code_dict)
+    _filter_secrets_in_any(code_dict)
 
     if isinstance(app_dic, dict) and isinstance(app_dic.get("secrets"), list):
-        before = len(app_dic["secrets"])
         app_dic["secrets"] = _filter_secrets_list(app_dic["secrets"])
-        after = len(app_dic["secrets"])
-        logger.warning("SECRET FILTER: app_dic['secrets'] %d -> %d", before, after)
-
-
 def initialize_app_dic(app_dic, file_ext):
     """Initialize App Dictionary."""
     checksum = app_dic['md5_hash']
