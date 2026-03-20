@@ -12,12 +12,6 @@ ENTROPY_PATTERNS = [
                     'ghijklmnopqrstuvwxyz0123456789+/='),
         'score': 5.0,
     },
-    {
-        # Hex
-        'pattern': re.compile(r'(?m)[a-fA-F\d-]{20,}'),
-        'charset': '1234567890abcdefABCDEF',
-        'score': 3.8,
-    },
 ]
 
 
