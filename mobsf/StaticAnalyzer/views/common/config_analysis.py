@@ -2,13 +2,19 @@
 
 import json
 import logging
-import yaml
+
 from pathlib import Path
 
 from mobsf.MobSF.utils import append_scan_status
 from mobsf.StaticAnalyzer.views.common.secret_patterns import is_secret
 
 logger = logging.getLogger(__name__)
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
 
 def _flatten(data, prefix=''):
     pairs = []
