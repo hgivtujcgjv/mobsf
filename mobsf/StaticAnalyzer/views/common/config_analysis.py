@@ -116,7 +116,7 @@ def scan_config_files(checksum,app_dir):
                 continue
 
             for key_path,value in parser(fp):
-                if is_secret(key_path):
+                if is_secret(key_path, value):
                     secrets.append(f'"{key_path}" : "{value}"')
 
 
