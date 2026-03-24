@@ -1,7 +1,5 @@
 import re
-
-from MobSF.utils import key
-
+ 
 _KEY_REGEXES = [
     re.compile(r'private(?:[_\-]?key)', re.I),
     re.compile(r'secret(?:[_\-]?key)?', re.I),
@@ -45,6 +43,7 @@ _NOISE_VALUE_RE = re.compile(
     re.I,
 )
  
+ 
 def _is_noise_value(val):
     if not val or len(val) < 4:
         return True
@@ -53,14 +52,13 @@ def _is_noise_value(val):
     return False
  
  
- 
 def match_secret_key(key):
     segments = key.replace('[', '.').replace(']', '').split('.')
     key_name = segments[-1] if segments else key
-
+ 
     if _EXCLUDE_KEY_RE.search(key_name):
-        return None 
-    
+        return None
+ 
     for pat in ALL_KEY_PATTERNS:
         if pat.search(key_name):
             return pat.pattern
