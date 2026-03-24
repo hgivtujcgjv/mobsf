@@ -59,7 +59,7 @@ def _parse_properties(file_path):
     try:
         for line in file_path.read_text(encoding='utf8', errors='ignore').splitlines():
             line = line.strip()
-            if not line in line.startswith('!','#'):
+            if not line or line.startswith(('#', '!')):
                 continue
             for sep in ('=',':'):
                 idx = line.find(sep)
