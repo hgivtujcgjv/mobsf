@@ -1,9 +1,9 @@
 # -*- coding: utf_8 -*-
 """Android APK and Source Analysis."""
 import logging
+import re
 import shutil
 from pathlib import Path
-import re
 
 import mobsf.MalwareAnalyzer.views.Trackers as Trackers
 import mobsf.MalwareAnalyzer.views.VirusTotal as VirusTotal
@@ -87,101 +87,19 @@ from mobsf.MobSF.views.authorization import (
 
 logger = logging.getLogger(__name__)
 
+# ---- BEGIN: URL filter patch ----
 SBER_URL_RX_STRICT = re.compile(
     r'\bhttps?:\/\/[\w.-]*(?:sberbank|sber|sbrf|sigma|delta|ci\d+|ift|majorcheck|majorgo)[^\s"\'<]*',
     re.IGNORECASE,
 )
-import re
 
-TOKEN_AUTH_RX = re.compile(r"(?i)(?:\S*(?:token|auth)\w*\s*[:=]\s*['\"`]?([\w\-=\.]+)['\"`]?|<[^>]*(?:token|auth)[^>]*>([^<]+)<|{{\s*[\w\.]*(?:token|auth)\w*\s*}})")
-
-KEY_RX = re.compile(
-    r"(['\"]?\w*key\w*['\"]?\s*[:=\s>\-]?\s*['\"]?\s*[a-zA-Z0-9_\s].*)|(\.\w*key\w*\s*\([^)]*\))",
-    re.IGNORECASE,
-)
-
-def _extract_text_from_secret_item(item) -> str:
-    if isinstance(item, str):
-        return item
-    if not isinstance(item, dict):
-        return str(item)
-
-    for k in ("value", "match", "secret", "string", "line", "text", "evidence", "details"):
-        v = item.get(k)
-        if v:
-            return str(v)
-
-    for k in ("title", "description", "issue", "message"):
-        v = item.get(k)
-        if v:
-            return str(v)
-
-    return str(item)
-
-def _filter_secrets_list(secrets: list) -> list:
-    out = []
-    for it in secrets:
-        txt = _extract_text_from_secret_item(it)
-        if (TOKEN_AUTH_RX.search(txt) or KEY_RX.search(txt)):
-            out.append(it)
-    return out
-
-def _filter_secrets_in_code_dic(code_dic: dict):
-    secrets = code_dic.get("secrets")
-    if isinstance(secrets, list):
-        code_dic["secrets"] = _filter_secrets_list(secrets)
-
-    findings = code_dic.get("findings")
-    if isinstance(findings, list):
-        filtered = []
-        for f in findings:
-            if not isinstance(f, dict):
-                filtered.append(f)
-                continue
-
-            title = str(f.get("title") or "")
-            issue = str(f.get("issue") or "")
-            desc  = str(f.get("description") or f.get("details") or "")
-
-            looks_like_secret_finding = (
-                "secret" in title.lower()
-                or "secret" in issue.lower()
-                or "hardcoded" in title.lower()
-                and "key" in title.lower()
-            )
-
-            if looks_like_secret_finding:
-                blob = " ".join([title, issue, desc, _extract_text_from_secret_item(f)])
-                if (TOKEN_AUTH_RX.search(blob) or KEY_RX.search(blob)):
-                    filtered.append(f)
-            else:
-                filtered.append(f)
-
-        code_dic["findings"] = filtered
-
-
-def _is_noise_path(p: str) -> bool:
-    p = (p or "").strip().lower()
-    return (not p) or (p in ("android string resource", "unknown", "none"))
-
-def _pick_better_path(old_path: str, new_path: str) -> str:
-    """
-    Выбираем "лучший" path для одного и того же URL.
-    Хотим предпочитать реальный исходник (.java/.kt/...) вместо "Android String Resource".
-    """
-    old_path = (old_path or "").strip()
-    new_path = (new_path or "").strip()
-    if _is_noise_path(old_path) and not _is_noise_path(new_path):
-        return new_path
-    if not old_path:
-        return new_path
-    return old_path
 
 def _filter_urls_in_code_dic(code_dic):
+    """Оставляем только URL, совпадающие с SBER_URL_RX_STRICT."""
     uf_before = code_dic.get("urls") or []
 
     filtered_groups = []
-    flat_order = [] 
+    flat_order = []
     seen_flat = set()
 
     for item in uf_before:
@@ -200,11 +118,9 @@ def _filter_urls_in_code_dic(code_dic):
                 continue
             if not SBER_URL_RX_STRICT.search(s):
                 continue
-
             if s not in group_seen:
                 group_seen.add(s)
                 group_urls.append(s)
-
             if s not in seen_flat:
                 seen_flat.add(s)
                 flat_order.append(s)
@@ -223,6 +139,8 @@ def _filter_urls_in_code_dic(code_dic):
 
     code_dic["urls"] = filtered_groups
     code_dic["urls_list"] = flat_order or ul_filtered
+# ---- END: URL filter patch ----
+
 
 def initialize_app_dic(app_dic, file_ext):
     checksum = app_dic['md5']
@@ -239,8 +157,11 @@ def get_size_and_hashes(app_dic):
 
 def get_manifest_data(app_dic):
     """Get Manifest Data."""
+    # Manifest XML parsed
     get_parsed_manifest(app_dic)
+    # Manifest data extraction
     man_data_dic = extract_manifest_data(app_dic)
+    # Manifest Analysis
     man_analysis = manifest_analysis(app_dic, man_data_dic)
     return man_data_dic, man_analysis
 
@@ -287,47 +208,72 @@ def apk_analysis_task(checksum, app_dic, rescan, queue=False):
         logger.info(msg)
         append_scan_status(checksum, msg)
         app_dic['zipped'] = 'apk'
-
-        app_dic['files'] = unzip(checksum, app_dic['app_path'], app_dic['app_dir'])
-
+        # Extract APK and get files
+        app_dic['files'] = unzip(
+            checksum,
+            app_dic['app_path'],
+            app_dic['app_dir'])
+        # Extract APK data with Androguard
         androguard_parse(app_dic)
+        # Extract APK data with AAPT/AAPT2
         aapt_parse(app_dic)
         get_hardcoded_cert_keystore(app_dic)
-
+        # Manifest Data
         man_data_dic, man_analysis = get_manifest_data(app_dic)
+        # Get App name
         get_apk_name(app_dic)
         print_scan_subject(app_dic, man_data_dic)
         get_app_details(app_dic, man_data_dic)
-
-        mal_perms = permissions.check_malware_permission(checksum, man_data_dic['perm'])
+        # Malware Permission check
+        mal_perms = permissions.check_malware_permission(
+            checksum,
+            man_data_dic['perm'])
         man_analysis['malware_permissions'] = mal_perms
-
+        # Get icon
         get_icon_apk(app_dic)
-
-        elf_dict = library_analysis(checksum, app_dic['app_dir'], 'elf')
+        elf_dict = library_analysis(
+            checksum,
+            app_dic['app_dir'],
+            'elf')
         cert_dic = cert_info(app_dic, man_data_dic)
-        apkid_results = apkid.apkid_analysis(checksum, app_dic['app_path'])
-
-        trackers = Trackers.Trackers(checksum, app_dic['app_dir'], app_dic['tools_dir']).get_trackers()
-
-        apk_2_java(checksum, app_dic['app_path'], app_dic['app_dir'], settings.DOWNLOADED_TOOLS_DIR)
-        dex_2_smali(checksum, app_dic['app_dir'], app_dic['tools_dir'])
-
+        apkid_results = apkid.apkid_analysis(
+            checksum,
+            app_dic['app_path'])
+        trackers = Trackers.Trackers(
+            checksum,
+            app_dic['app_dir'],
+            app_dic['tools_dir']).get_trackers()
+        apk_2_java(
+            checksum,
+            app_dic['app_path'],
+            app_dic['app_dir'],
+            settings.DOWNLOADED_TOOLS_DIR)
+        dex_2_smali(
+            checksum,
+            app_dic['app_dir'],
+            app_dic['tools_dir'])
         code_an_dic = code_analysis(
             checksum,
             app_dic['app_dir'],
             app_dic['zipped'],
             app_dic['manifest_file'],
             man_data_dic['perm'])
-
-        get_strings_metadata(app_dic, elf_dict['elf_strings'], ['.java'], code_an_dic)
-
-        code_an_dic['firebase'] = firebase_analysis(checksum, code_an_dic)
-        _filter_secrets_in_code_dic(code_an_dic)
+        # Get the strings and metadata
+        get_strings_metadata(
+            app_dic,
+            elf_dict['elf_strings'],
+            ['.java'],
+            code_an_dic)
+        # Firebase DB Check
+        code_an_dic['firebase'] = firebase_analysis(
+            checksum,
+            code_an_dic)
+        # URL filter patch
         _filter_urls_in_code_dic(code_an_dic)
-
-        code_an_dic['domains'] = MalwareDomainCheck().scan(checksum, code_an_dic['urls_list'])
-
+        # Domain Extraction and Malware Check
+        code_an_dic['domains'] = MalwareDomainCheck().scan(
+            checksum,
+            code_an_dic['urls_list'])
         context = save_get_ctx(
             app_dic,
             man_data_dic,
@@ -340,13 +286,16 @@ def apk_analysis_task(checksum, app_dic, rescan, queue=False):
             rescan,
         )
         if queue:
-            return mark_task_completed(checksum, app_dic['subject'], 'Success')
+            return mark_task_completed(
+                checksum, app_dic['subject'], 'Success')
         return context, None
     except Exception as exp:
         if queue:
-            return mark_task_completed(checksum, 'Failed', repr(exp))
+            return mark_task_completed(
+                checksum, 'Failed', repr(exp))
         return context, repr(exp)
     finally:
+        # Clean up
         clean_up(app_dic)
 
 
@@ -401,39 +350,49 @@ def src_analysis_task(checksum, app_dic, rescan, pro_type, queue=False):
         app_dic['strings'] = []
         app_dic['secrets'] = []
         app_dic['zipped'] = pro_type
-
         get_hardcoded_cert_keystore(app_dic)
-
+        # Manifest Data
         man_data_dic, man_analysis = get_manifest_data(app_dic)
         get_apk_name(app_dic)
         print_scan_subject(app_dic, man_data_dic)
         get_app_details(app_dic, man_data_dic)
-
-        mal_perms = permissions.check_malware_permission(checksum, man_data_dic['perm'])
+        # Malware Permission check
+        mal_perms = permissions.check_malware_permission(
+            checksum,
+            man_data_dic['perm'])
         man_analysis['malware_permissions'] = mal_perms
-
-        get_icon_from_src(app_dic, man_data_dic['icons'])
-
+        # Get icon
+        get_icon_from_src(
+            app_dic,
+            man_data_dic['icons'])
         code_an_dic = code_analysis(
             checksum,
             app_dic['app_dir'],
             app_dic['zipped'],
             app_dic['manifest_file'],
             man_data_dic['perm'])
-
-        get_strings_metadata(app_dic, None, ['.java', '.kt'], code_an_dic)
-
-        code_an_dic['firebase'] = firebase_analysis(checksum, code_an_dic)
-
-        _filter_secrets_in_code_dic(code_an_dic)
+        # Get the strings and metadata
+        get_strings_metadata(
+            app_dic,
+            None,
+            ['.java', '.kt'],
+            code_an_dic)
+        # Firebase DB Check
+        code_an_dic['firebase'] = firebase_analysis(
+            checksum,
+            code_an_dic)
+        # URL filter patch
         _filter_urls_in_code_dic(code_an_dic)
-
-        code_an_dic['domains'] = MalwareDomainCheck().scan(checksum, code_an_dic['urls_list'])
-
+        # Domain Extraction and Malware Check
+        code_an_dic['domains'] = MalwareDomainCheck().scan(
+            checksum,
+            code_an_dic['urls_list'])
+        # Extract Trackers from Domains
         trackers = Trackers.Trackers(
-            checksum, None, app_dic['tools_dir']
-        ).get_trackers_domains_or_deps(code_an_dic['domains'], [])
-
+            checksum,
+            None,
+            app_dic['tools_dir']).get_trackers_domains_or_deps(
+                code_an_dic['domains'], [])
         context = save_get_ctx(
             app_dic,
             man_data_dic,
@@ -446,10 +405,12 @@ def src_analysis_task(checksum, app_dic, rescan, pro_type, queue=False):
             rescan,
         )
         if queue:
-            return mark_task_completed(checksum, app_dic['subject'], 'Success')
+            return mark_task_completed(
+                checksum, app_dic['subject'], 'Success')
     except Exception as exp:
         if queue:
-            return mark_task_completed(checksum, 'Failed', repr(exp))
+            return mark_task_completed(
+                checksum, 'Failed', repr(exp))
     return context
 
 
@@ -465,9 +426,10 @@ def src_analysis(request, app_dic, rescan, api):
     """Source Code Analysis."""
     checksum = initialize_app_dic(app_dic, 'zip')
     ret = f'/static_analyzer_ios/{checksum}/'
-    db_entry = StaticAnalyzerAndroid.objects.filter(MD5=checksum)
-    ios_db_entry = StaticAnalyzerIOS.objects.filter(MD5=checksum)
-
+    db_entry = StaticAnalyzerAndroid.objects.filter(
+        MD5=checksum)
+    ios_db_entry = StaticAnalyzerIOS.objects.filter(
+        MD5=checksum)
     if db_entry.exists() and not rescan:
         context = get_context_from_db_entry(db_entry)
         return generate_dynamic_src_context(request, context, api)
@@ -476,29 +438,30 @@ def src_analysis(request, app_dic, rescan, api):
     else:
         append_scan_status(checksum, 'init')
         get_size_and_hashes(app_dic)
-
         msg = 'Extracting ZIP'
         logger.info(msg)
         append_scan_status(checksum, msg)
-
-        app_dic['files'] = unzip(checksum, app_dic['app_path'], app_dic['app_dir'])
-
-        pro_type, valid = valid_source_code(checksum, app_dic['app_dir'])
-
+        app_dic['files'] = unzip(
+            checksum,
+            app_dic['app_path'],
+            app_dic['app_dir'])
+        pro_type, valid = valid_source_code(
+            checksum,
+            app_dic['app_dir'])
         msg = f'Source code type - {pro_type}'
         logger.info(msg)
         append_scan_status(checksum, msg)
-
         if valid and pro_type == 'ios':
             msg = 'Redirecting to iOS Source Code Analyzer'
             logger.info(msg)
             append_scan_status(checksum, msg)
             ret = f'{ret}?rescan={str(int(rescan))}'
             return {'type': 'ios'} if api else HttpResponseRedirect(ret)
-
         if not has_permission(request, Permissions.SCAN, api):
-            return print_n_send_error_response(request, 'Permission Denied', False)
-
+            return print_n_send_error_response(
+                request,
+                'Permission Denied',
+                False)
         if valid and (pro_type in ['eclipse', 'studio']):
             if settings.ASYNC_ANALYSIS:
                 return async_analysis(
@@ -511,7 +474,10 @@ def src_analysis(request, app_dic, rescan, api):
         else:
             msg = 'This ZIP Format is not supported'
             if api:
-                return print_n_send_error_response(request, msg, True)
+                return print_n_send_error_response(
+                    request,
+                    msg,
+                    True)
             else:
                 print_n_send_error_response(request, msg, False)
                 ctx = {
@@ -528,13 +494,11 @@ def is_android_source(app_path):
     src = app_path / 'src'
     if man.is_file() and src.exists():
         return 'eclipse', True
-
     man = app_path / 'app' / 'src' / 'main' / 'AndroidManifest.xml'
     java = app_path / 'app' / 'src' / 'main' / 'java'
     kotlin = app_path / 'app' / 'src' / 'main' / 'kotlin'
     if man.is_file() and (java.exists() or kotlin.exists()):
         return 'studio', True
-
     return None, False
 
 
@@ -551,32 +515,25 @@ def valid_source_code(checksum, app_dir):
         msg = 'Detecting source code type'
         logger.info(msg)
         append_scan_status(checksum, msg)
-
         app_path = Path(app_dir)
         ide, is_and = is_android_source(app_path)
-
         if ide:
             return ide, is_and
-
         for subdir in app_path.iterdir():
             if subdir.is_dir() and subdir.exists():
                 ide, is_and = is_android_source(subdir)
                 if ide:
                     move_to_parent(subdir, app_path)
                     return ide, is_and
-
         xcode = [f for f in app_path.iterdir() if f.suffix == '.xcodeproj']
         if xcode:
             return 'ios', True
-
         for subdir in app_path.iterdir():
             if subdir.is_dir() and subdir.exists():
                 if any(f.suffix == '.xcodeproj' for f in subdir.iterdir()):
                     return 'ios', True
-
         return '', False
     except Exception as exp:
         msg = 'Error identifying source code type from zip'
         logger.exception(msg)
         append_scan_status(checksum, msg, repr(exp))
-        return '', False
