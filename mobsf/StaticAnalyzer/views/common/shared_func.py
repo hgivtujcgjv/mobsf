@@ -370,6 +370,12 @@ def url_n_email_extract(dat, relative_path):
     for email in EMAIL_REGEX.findall(dat.lower()):
         if not email.startswith('//'):
             emails.add(email)
+    ALLOWED_DOMAINS = (
+        '@sbrf.ru', '@yandex.ru', '@mail.ru', '@gmail.ru', 'sberbank.ru'
+    )
+
+    emails = {e for e in emails if any(e.endswith(d) for d in ALLOWED_DOMAINS)}
+    
     if emails:
         email_n_file.append({
             'emails': list(emails),
