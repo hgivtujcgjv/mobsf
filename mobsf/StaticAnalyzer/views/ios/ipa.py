@@ -51,6 +51,10 @@ from mobsf.StaticAnalyzer.views.common.shared_func import (
 from mobsf.StaticAnalyzer.views.common.firebase import (
     firebase_analysis,
 )
+# NEW: config file scanner (JSON, YAML, .properties) — same as Android
+from mobsf.StaticAnalyzer.views.common.config_analysis import (
+    scan_config_files,
+)
 from mobsf.StaticAnalyzer.views.common.appsec import (
     get_ios_dashboard,
 )
@@ -272,6 +276,11 @@ def ipa_analysis_task(checksum, app_dic, rescan, queue=False):
             bin_dict,
             app_dic['all_files'],
             lb['macho_strings'])
+        # NEW: scan config files (JSON, YAML, .properties) for secrets
+        config_secrets = scan_config_files(
+            checksum, Path(app_dic['app_dir']))
+        app_dic['secrets'].extend(config_secrets)
+        app_dic['secrets'] = list(set(app_dic['secrets']))
         # URL filter patch
         _filter_urls_in_code_dic(code_dict)
         # Domain Extraction and Malware Check
@@ -359,6 +368,11 @@ def ios_analysis_task(checksum, app_dic, rescan, queue=False):
             ['.swift', '.m', '.h', '.plist', '.json'])
         if ios_strs['secrets']:
             app_dic['secrets'].extend(list(ios_strs['secrets']))
+        # NEW: scan config files (JSON, YAML, .properties) for secrets
+        config_secrets = scan_config_files(
+            checksum, Path(app_dic['app_dir']))
+        app_dic['secrets'].extend(config_secrets)
+        app_dic['secrets'] = list(set(app_dic['secrets']))
         # URL filter patch
         _filter_urls_in_code_dic(code_dict)
         # Get App Icon
