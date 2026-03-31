@@ -47,6 +47,8 @@ _NOISE_VALUE_RE = re.compile(
 def _is_noise_value(val):
     if not val or len(val) < 4:
         return True
+    if ' ' in val:
+        return True
     if val.lower() in ('string', 'value', 'example', 'sample',
                         'placeholder', 'your_key_here',
                         'change_me', 'todo', 'xxx', 'dummy'):
