@@ -53,6 +53,19 @@ def _is_noise_value(val):
                         'placeholder', 'your_key_here',
                         'change_me', 'todo', 'xxx', 'dummy'):
         return True
+
+    if val.startswith(('http://', 'https://', 'ftp://', 'file://')):
+        return True
+
+    if any('\u0400' <= c <= '\u04ff' for c in val):
+        return True
+
+    if val.startswith('com.') and val.count('.') >= 2:
+        return True
+     
+    if val.isdigit():
+        return True
+     
     if _NOISE_VALUE_RE.match(val):
         return True
     return False
