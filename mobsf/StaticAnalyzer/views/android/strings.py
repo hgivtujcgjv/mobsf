@@ -29,6 +29,20 @@ from mobsf.MobSF.utils import (
 
 logger = logging.getLogger(__name__)
 
+def _dedup_secrets(secrets):
+    seen = set()
+    unique = []
+    for s in secrets:
+        if isinstance(s, dict):
+            val = s.get('secret', '')
+            item = s
+        else:
+            val = str(s)
+            item = {'secret': val, 'path': ''}
+        if val and val not in seen:
+            seen.add(val)
+            unique.append(item)
+    return unique
 
 def strings_from_so(checksum, elf_strings):
     """Extract Strings from so file."""
@@ -84,6 +98,10 @@ def strings_from_apk(checksum, app_dic):
                 res_string = res_value.get('string')
                 if not res_string:
                     continue
+                if _res_key and _res_key.strip('\x00'):
+                    res_path = f'apktool_out/res/values-{_res_key}/strings.xml'
+                else:
+                    res_path = 'apktool_out/res/values/strings.xml'
 
                 for key, value in res_string:
                     if not value:
@@ -101,7 +119,10 @@ def strings_from_apk(checksum, app_dic):
 
                     # NEW
                     if is_secret(key, value):
-                        results['secrets'].append(formatted_str)
+                        results['secrets'].append({
+                            'secret': formatted_str,
+                            'path': res_path,
+                        })
         elif app_dic.get('apk_strings'):
             # No secret key check for APK strings
             results['strings'] = app_dic['apk_strings']
@@ -177,20 +198,22 @@ def get_strings_metadata(app_dic, elf_strings, exts, code_dic):
                 urls_list.extend(s['urls_list'])
                 urls_n_files.extend(s['urls_nf'])
                 emails_n_files.extend(s['emails_nf'])
-                secrets.extend(s['secrets'])
-        secrets = list(set(secrets))
+                for sec in s['secrets']:
+                    secrets.append({'secret': sec, 'path': so_file})
+        secrets = _dedup_secrets(secrets)
         strings['strings_so'] = so_strings
 
     if exts:
         # Source Code
         code_res = strings_from_code(checksum, app_dir, typ, exts)
         strings['strings_code'] = list(code_res['strings'])
-        secrets.extend(code_res['secrets'])
+        for sec, path in code_res['secrets'].items():
+            secrets.append({'secret': sec, 'path': path})
 
     config_secrets = scan_config_files(checksum, Path(app_dir))
     secrets.extend(config_secrets)
     code_dic['strings'] = strings
-    code_dic['secrets'] = list(secrets)
+    code_dic['secrets'] = _dedup_secrets(secrets)
     # Code Analysis has urls, urlsnfiles and emailsnfiles
     code_dic['urls'].extend(urls_n_files)
     code_dic['emails'].extend(emails_n_files)
