@@ -370,12 +370,13 @@ def url_n_email_extract(dat, relative_path):
     for email in EMAIL_REGEX.findall(dat.lower()):
         if not email.startswith('//'):
             emails.add(email)
+
     ALLOWED_DOMAINS = (
         '@sbrf.ru', '@yandex.ru', '@mail.ru', '@gmail.ru', 'sberbank.ru'
     )
 
     emails = {e for e in emails if any(e.endswith(d) for d in ALLOWED_DOMAINS)}
-    
+
     if emails:
         email_n_file.append({
             'emails': list(emails),
@@ -478,7 +479,8 @@ def strings_and_entropies(checksum, src, exts):
     append_scan_status(checksum, msg)
     data = {
         'strings': set(),
-        'secrets': set(),
+        'secrets': {},
+        'strings_paths': {},
     }
     try:
         if not (src and src.exists()):
@@ -502,8 +504,17 @@ def strings_and_entropies(checksum, src, exts):
                 if not string[0].isalnum():
                     continue
                 data['strings'].add(string)
+                data['strings_paths'][string] = str(p.relative_to(src))
         if data['strings']:
-            data['secrets'] = get_entropies(data['strings'])
+            entropy_secrets = get_entropies(data['strings'])
+            data['secrets'] = {}
+            for sec in entropy_secrets:
+                found_path = ''
+                for orig, path in data['strings_paths'].items():
+                    if sec in orig:
+                        found_path = path
+                        break
+                data['secrets'][sec] = found_path
     except Exception as exp:
         msg = 'Failed to extract String values and entropies from Code'
         logger.exception(msg)
