@@ -47,25 +47,21 @@ _NOISE_VALUE_RE = re.compile(
 def _is_noise_value(val):
     if not val or len(val) < 4:
         return True
+
     if ' ' in val:
         return True
+        
+    if '\\u0' in val:
+        return True 
+            
+    if any('\u0400' <= c <= '\u04ff' for c in val):
+        return True
+   
     if val.lower() in ('string', 'value', 'example', 'sample',
                         'placeholder', 'your_key_here',
                         'change_me', 'todo', 'xxx', 'dummy'):
         return True
 
-    if val.startswith(('http://', 'https://', 'ftp://', 'file://')):
-        return True
-
-    if any('\u0400' <= c <= '\u04ff' for c in val):
-        return True
-
-    if val.startswith('com.') and val.count('.') >= 2:
-        return True
-     
-    if val.isdigit():
-        return True
-     
     if _NOISE_VALUE_RE.match(val):
         return True
     return False
