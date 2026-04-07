@@ -72,28 +72,23 @@ PARSERS = {
 }
 
 _SKIP_NAMES = frozenset({
-    # Android
     'package.json', 'package-lock.json', 'composer.json',
     'build.gradle', 'settings.gradle',
     'google-services.json',
     'AndroidManifest.xml',
-    # CHANGED: added iOS asset/project metadata (no secrets inside)
     'Contents.json',
     'project.pbxproj',
 })
 
 _SKIP_DIRS = frozenset({
-    # Android
     'node_modules', '.gradle', 'build', '__pycache__',
     '.git', '.svn', '.idea',
-    '_CodeSignature',
-    'SC_Info',
+    '_CodeSignature',   
+    'SC_Info',          
     'Pods',
     'Carthage',
 })
 
-# CHANGED: added pattern-based skip for mock/test/stub directories
-# Catches MockedJSON.bundle, TestData/, StubResponses/, etc.
 _SKIP_DIR_PATTERNS = (
     'mock', 'stub', 'test', 'example',
     'sample', 'fixture', 'fake', 'dummy',
@@ -129,9 +124,13 @@ def scan_config_files(checksum,app_dir):
             parser = PARSERS.get(fp.suffix.lower())
             if not parser:
                 continue
+            rel_path = str(fp.relative_to(app_path))
             for key_path,value in parser(fp):
                 if is_secret(key_path, value):
-                    secrets.append(f'"{key_path}" : "{value}"')
+                    secrets.append({
+                        'secret': f'"{key_path}" : "{value}"',
+                        'path': rel_path,
+                    })
     except Exception as exp:
         msg = 'Failed to scan config files for secrets'
         logger.exception(msg)
