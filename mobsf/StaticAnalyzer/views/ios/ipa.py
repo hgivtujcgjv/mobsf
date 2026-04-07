@@ -79,6 +79,20 @@ SBER_URL_RX_STRICT = re.compile(
     re.IGNORECASE,
 )
 
+def _dedup_secrets(secrets):
+    seen = set()
+    unique = []
+    for s in secrets:
+        if isinstance(s, dict):
+            val = s.get('secret', '')
+            item = s
+        else:
+            val = str(s)
+            item = {'secret': val, 'path': ''}
+        if val and val not in seen:
+            seen.add(val)
+            unique.append(item)
+    return unique
 
 def _filter_urls_in_code_dic(code_dic: dict):
     """
@@ -280,7 +294,7 @@ def ipa_analysis_task(checksum, app_dic, rescan, queue=False):
         config_secrets = scan_config_files(
             checksum, Path(app_dic['app_dir']))
         app_dic['secrets'].extend(config_secrets)
-        app_dic['secrets'] = list(set(app_dic['secrets']))
+        app_dic['secrets'] = _dedup_secrets(app_dic['secrets'])
         # URL filter patch
         _filter_urls_in_code_dic(code_dict)
         # Domain Extraction and Malware Check
@@ -367,12 +381,13 @@ def ios_analysis_task(checksum, app_dic, rescan, queue=False):
             Path(app_dic['app_dir']),
             ['.swift', '.m', '.h', '.plist', '.json'])
         if ios_strs['secrets']:
-            app_dic['secrets'].extend(list(ios_strs['secrets']))
+            for sec, path in ios_strs['secrets'].items():
+                app_dic['secrets'].append({'secret': sec, 'path': path})
         # NEW: scan config files (JSON, YAML, .properties) for secrets
         config_secrets = scan_config_files(
             checksum, Path(app_dic['app_dir']))
         app_dic['secrets'].extend(config_secrets)
-        app_dic['secrets'] = list(set(app_dic['secrets']))
+        app_dic['secrets'] = _dedup_secrets(app_dic['secrets'])
         # URL filter patch
         _filter_urls_in_code_dic(code_dict)
         # Get App Icon
